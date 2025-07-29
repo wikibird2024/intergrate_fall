@@ -1,0 +1,9 @@
+# YOLOv8n + nhẹ, nhanh, ổn định
+torch==2.1.1
+torchvision==0.16.1
+torchaudio==2.1.1
+ultralytics==8.1.25
+opencv-python>=4.8
+mediapipe==0.10.21
+paho-mqtt>=1.6
+
