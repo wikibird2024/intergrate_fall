@@ -1,65 +1,55 @@
-from panoramisk import Manager
 import asyncio
+from panoramisk.manager import Manager
+from config.config import AMI_HOST, AMI_PORT, AMI_USERNAME, AMI_SECRET
+from config.config import EXTENSIONS, ALERT_MESSAGE, CALLER_ID
+
 
 class AMITrigger:
-    def __init__(self, host="localhost", port=5038, username="admin", secret="secret"):
-        """Initialize Asterisk AMI connection."""
+    def __init__(self):
         self.manager = Manager(
-            host=host,
-            port=port,
-            username=username,
-            secret=secret
+            host=AMI_HOST, port=AMI_PORT, username=AMI_USERNAME, secret=AMI_SECRET
         )
-        # Danh sách các thiết bị SIP cần cảnh báo
-        self.devices = ["6001", "6002", "6003"]
+        self.devices = EXTENSIONS
+        self.alert_message = ALERT_MESSAGE
+        self.caller_id = CALLER_ID
 
-    async def connect(self):
-        """Establish connection to Asterisk AMI."""
+    async def send_alert_calls(self):
+        print(f"[AMI] Triggering alert to {len(self.devices)} device(s)...")
+
+        tasks = [self._originate_call(extension) for extension in self.devices]
+        await asyncio.gather(*tasks)
+
+    async def _originate_call(self, extension):
+        try:
+            response = await self.manager.send_action(
+                {
+                    "Action": "Originate",
+                    "Channel": f"PJSIP/{extension}",
+                    "Context": "internal",
+                    "Exten": extension,
+                    "Priority": 1,
+                    "CallerID": f"{self.caller_id} <{extension}>",
+                    "Async": "true",
+                }
+            )
+
+            if isinstance(response, dict):
+                status = response.get("Response", "Unknown")
+                message = response.get("Message", "")
+                print(f"[📞 CALL] → {extension} | Status: {status} - {message}")
+            else:
+                print(f"[📞 CALL] → {extension} | ❌ Invalid AMI response: {response}")
+
+        except Exception as e:
+            print(f"[📞 CALL] → {extension} | ❌ Error: {e}")
+
+    async def trigger(self):
         await self.manager.connect()
-
-    async def trigger_call(self, number: str):
-        """
-        Trigger a SIP call to the specified number/device.
-        Parameters:
-            number (str): SIP extension (e.g., '6001')
-        """
-        action = {
-            'Action': 'Originate',
-            'Channel': f'SIP/{number}',
-            'Context': 'default',
-            'Exten': number,
-            'Priority': '1',
-            'CallerID': 'FallAlert <1000>',
-            'Timeout': '30000',  # 30 seconds
-        }
-        await self.manager.send_action(action)
-
-    async def send_sms(self, number: str, message: str):
-        """
-        Send a message to the specified SIP device.
-        Parameters:
-            number (str): SIP extension
-            message (str): Message content
-        """
-        action = {
-            'Action': 'MessageSend',
-            'To': f'SIP/{number}',
-            'From': 'FallAlert <1000>',
-            'Body': message,
-        }
-        await self.manager.send_action(action)
-
-    async def alert_devices(self, message: str = "Fall detected!"):
-        """
-        Trigger both call and SMS alerts to all configured devices.
-        Parameters:
-            message (str): Alert message content
-        """
-        for device in self.devices:
-            await self.trigger_call(device)
-            await self.send_sms(device, message)
-
-    async def close(self):
-        """Close the AMI connection gracefully."""
+        await self.send_alert_calls()
+        await asyncio.sleep(2)
         self.manager.close()
+        print("[AMI] Done triggering and disconnected.")
 
+
+if __name__ == "__main__":
+    asyncio.run(AMITrigger().trigger())

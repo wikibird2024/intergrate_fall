@@ -7,3 +7,4 @@ opencv-python>=4.8
 mediapipe==0.10.21
 paho-mqtt>=1.6
 
+panoramisk==1.4.0
