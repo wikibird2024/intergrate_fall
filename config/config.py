@@ -26,9 +26,9 @@ ENABLE_MQTT = os.getenv("ENABLE_MQTT", "True").lower() == "true"
 # ==============================
 # Telegram Parameters
 # ==============================
-ENABLE_TELEGRAM = True
-TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
-TELEGRAM_CHAT_ID = "YOUR_CHAT_ID_HERE"
+ENABLE_TELEGRAM = os.getenv("ENABLE_TELEGRAM", "True").lower() == "true"
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # ==============================
 # Video Capture Configuration
