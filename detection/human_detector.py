@@ -5,17 +5,27 @@ from ultralytics import YOLO
 
 
 class HumanDetector:
-    def __init__(self, model_path="yolov8n.pt"):
+    def __init__(self, model_path="yolov8n.pt", conf_threshold=0.5, iou_threshold=0.7):
+        """
+        Initializes the human detector with a YOLO model.
+        Args:
+            model_path (str): Path to the YOLO model weights.
+        """
         self.model = YOLO(model_path)
         self.class_id_person = 0
+        self.conf_threshold = conf_threshold
+        self.iou_threshold = iou_threshold
 
-    # Add the 'conf_threshold' and 'iou_threshold' parameters here
-    def detect_humans(self, frame, conf_threshold, iou_threshold):
+    def detect_humans(self, frame):
         """
-        Detects humans in a video frame with adjustable confidence and IoU thresholds.
+        Detects humans in a video frame.
+        Args:
+            frame: The input video frame (numpy array).
+        Returns:
+            A list of detected person bounding boxes.
         """
         results = self.model.predict(
-            frame, conf=conf_threshold, iou=iou_threshold, verbose=False
+            frame, conf=self.conf_threshold, iou=self.iou_threshold, verbose=False
         )[0]
 
         if results.boxes is None or results.boxes.xyxy is None:

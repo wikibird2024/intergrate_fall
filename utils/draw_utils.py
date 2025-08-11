@@ -14,25 +14,37 @@ mp_pose = mp.solutions.pose
 POSE_CONNECTIONS = mp_pose.POSE_CONNECTIONS
 
 
-def draw_bounding_box(frame, box, color=BOUNDING_BOX_COLOR, thickness=BOUNDING_BOX_THICKNESS):
+def draw_bounding_box(frame, box, person_id, status, color=BOUNDING_BOX_COLOR, thickness=BOUNDING_BOX_THICKNESS):
     """
-    Vẽ hộp bao quanh người.
-
+    Draws a bounding box with an ID and status label, changing color based on status.
+    
     Args:
-        frame: Ảnh gốc.
-        box: List hoặc tuple (x1, y1, x2, y2, conf, class_id).
-        color: Màu hộp vẽ (BGR).
-        thickness: Độ dày đường viền.
+        frame: The input image.
+        box: A list or tuple (x1, y1, x2, y2, conf, class_id).
+        person_id: The unique ID of the person.
+        status: The status of the person (e.g., 'normal', 'fall').
+        color: Default color for the box (BGR).
+        thickness: The thickness of the box border.
     """
     x1, y1, x2, y2, conf, cls_id = box
-    cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
+
+    # Choose color based on status
+    if status == 'fall':
+        box_color = (0, 0, 255)  # Red for fall
+    else:
+        box_color = (0, 255, 0)  # Green for normal/default
+
+    cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, thickness)
+    
+    # Display the person ID, status, and confidence
+    label = f"ID: {person_id} | Status: {status} | Conf: {conf:.2f}"
     cv2.putText(
         frame,
-        f"Conf: {conf:.2f}",
+        label,
         (x1, y1 - 10),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.5,
-        color,
+        box_color,
         2,
     )
 
@@ -41,16 +53,16 @@ def draw_skeleton(frame, landmarks, visibility_th=0.5,
                   line_color=SKELETON_LINE_COLOR, line_thickness=SKELETON_LINE_THICKNESS,
                   point_color=SKELETON_POINT_COLOR, point_radius=SKELETON_POINT_RADIUS):
     """
-    Vẽ bộ xương người dựa trên danh sách landmarks dạng [x, y, z, visibility].
+    Draws a person's skeleton based on a list of landmarks in the format [x, y, z, visibility].
 
     Args:
-        frame: Ảnh đầu vào (numpy array).
-        landmarks: List các landmark dạng [x, y, z, visibility].
-        visibility_th: Ngưỡng visibility để vẽ.
-        line_color: Màu đường kẻ bộ xương (BGR).
-        line_thickness: Độ dày đường kẻ bộ xương.
-        point_color: Màu điểm khớp (BGR).
-        point_radius: Bán kính điểm khớp.
+        frame: The input image (numpy array).
+        landmarks: A list of landmarks in the format [x, y, z, visibility].
+        visibility_th: The visibility threshold for drawing.
+        line_color: The color of the skeleton lines (BGR).
+        line_thickness: The thickness of the skeleton lines.
+        point_color: The color of the joint points (BGR).
+        point_radius: The radius of the joint points.
     """
     if not landmarks:
         return
