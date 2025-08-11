@@ -1,16 +1,18 @@
+# main.py
 import cv2
 import asyncio
 from datetime import datetime
 import json
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 # Import application modules
 from detection.human_detector import HumanDetector
 from detection.skeleton_tracker import SkeletonTracker
-from detection.person_tracker import PersonTracker # NEW import
-from fall.fall_detector import FallDetector
+from detection.person_tracker import PersonTracker
+from processing.detection_processor import DetectionProcessor  # NEW import
 from comm.mqtt_client import MQTTClient
 from comm.ami_trigger import AMITrigger
+from comm.telegram_bot import TelegramBot
 from utils.draw_utils import draw_bounding_box, draw_skeleton
 from database.database_manager import create_table, insert_fall_event
 
@@ -32,7 +34,10 @@ from config.config import (
     IOU_THRESHOLD,
     POSE_MODEL_COMPLEXITY,            
     POSE_MIN_DETECTION_CONFIDENCE,    
-    POSE_MIN_TRACKING_CONFIDENCE      
+    POSE_MIN_TRACKING_CONFIDENCE,
+    ENABLE_TELEGRAM,
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID
 )
 
 async def mqtt_listener_task(mqtt_client: MQTTClient, message_queue: asyncio.Queue):
@@ -61,14 +66,18 @@ async def main():
         min_tracking_confidence=POSE_MIN_TRACKING_CONFIDENCE
     )
     
-    # NEW: Initialize a person tracker and dictionaries for state management
     person_tracker = PersonTracker(iou_threshold=IOU_THRESHOLD)
-    fall_detectors: Dict[int, FallDetector] = {}
-    person_status: Dict[int, str] = {}
     
     ami_trigger = AMITrigger(
         host=AMI_HOST, port=AMI_PORT, username=AMI_USERNAME, secret=AMI_SECRET
     )
+
+    telegram_bot = None
+    if ENABLE_TELEGRAM:
+        telegram_bot = TelegramBot(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+
+    # NEW: Initialize the detection processor
+    detection_processor = DetectionProcessor(ami_trigger, telegram_bot)
 
     mqtt_client = None
     mqtt_task = None
@@ -122,7 +131,7 @@ async def main():
             if not ret:
                 break
 
-            # 1. Detect all humans and get tracked IDs
+            # Core processing loop
             detected_boxes = human_detector.detect_humans(frame)
             tracked_people = person_tracker.update(detected_boxes)
             
@@ -130,55 +139,9 @@ async def main():
             if not message_queue.empty():
                 mqtt_msg = message_queue.get_nowait()
 
-            # 2. Iterate through each tracked person
             for person_id, box in tracked_people:
-                # Get or create a FallDetector for this person
-                if person_id not in fall_detectors:
-                    fall_detectors[person_id] = FallDetector()
-                    person_status[person_id] = 'normal' # Initialize new person status
-                
-                person_detector = fall_detectors[person_id]
-                
                 landmarks = skeleton_tracker.track_from_box(frame, box)
-                
-                is_fall = False
-                if landmarks:
-                    # Check for MQTT message specific to this person's device
-                    mqtt_status_for_person = None
-                    if mqtt_msg and mqtt_msg.get('device_id') == f"ESP32_DEV_{person_id}":
-                        mqtt_status_for_person = mqtt_msg
-                        
-                    is_fall = person_detector.detect_fall(landmarks, mqtt_status_for_person)
-
-                # 3. Update status and draw visuals
-                if is_fall:
-                    person_status[person_id] = 'fall'
-                elif landmarks: # Only update to normal if they are visible
-                    person_status[person_id] = 'normal'
-
-                draw_bounding_box(frame, box, person_id, person_status.get(person_id, 'normal'))
-                if landmarks:
-                    draw_skeleton(frame, landmarks)
-                
-                # 4. Handle fall events and alerts
-                if is_fall:
-                    if mqtt_msg and mqtt_msg.get('device_id') == f"ESP32_DEV_{person_id}":
-                        fall_id = insert_fall_event(mqtt_msg)
-                        gps_info = f"{mqtt_msg.get('latitude', 'Unknown')}, {mqtt_msg.get('longitude', 'Unknown')}"
-                        alert_msg = f"Fall detected at GPS: {gps_info}. Event ID: {fall_id}"
-                    else:
-                        fall_id = insert_fall_event({
-                            "timestamp": datetime.now().timestamp(),
-                            "device_id": f"Camera_{person_id}", # Use the person ID for unique events
-                            "fall_detected": True,
-                            "latitude": 0,
-                            "longitude": 0,
-                            "has_gps_fix": False
-                        })
-                        alert_msg = f"Fall detected via camera. No MQTT data. Event ID: {fall_id}"
-
-                    print("⚠️ " + alert_msg)
-                    await ami_trigger.alert_devices(alert_msg)
+                await detection_processor.process_person(frame, person_id, box, landmarks, mqtt_msg)
 
             cv2.imshow("Fall Detection", frame)
 

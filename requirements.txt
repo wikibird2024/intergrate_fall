@@ -1,4 +1,4 @@
-# YOLOv8n + nhẹ, nhanh, ổn định
+# YOLOv8n + light, fast, stable
 torch==2.1.1
 torchvision==0.16.1
 torchaudio==2.1.1
@@ -7,3 +7,4 @@ opencv-python>=4.8
 mediapipe==0.10.21
 paho-mqtt>=1.6
 panoramisk==1.4.0
+python-telegram-bot>=20.0
