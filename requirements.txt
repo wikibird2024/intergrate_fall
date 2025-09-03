@@ -9,4 +9,4 @@ paho-mqtt>=1.6
 panoramisk==1.4.0
 python-telegram-bot>=20.0
 python-dotenv
-@:python_version=3.10.13
+#@:python_version=3.10.13

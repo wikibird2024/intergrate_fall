@@ -81,6 +81,7 @@ async def main():
 
     mqtt_client = None
     mqtt_task = None
+    mqtt_loop_task = None
     message_queue = asyncio.Queue()
 
     # 2. Initialize the database table
@@ -97,7 +98,7 @@ async def main():
                 password=MQTT_PASSWORD,
                 keepalive=MQTT_KEEPALIVE,
             )
-            asyncio.create_task(mqtt_client.run_forever())
+            mqtt_loop_task = asyncio.create_task(mqtt_client.run_forever())
             mqtt_task = asyncio.create_task(
                 mqtt_listener_task(mqtt_client, message_queue)
             )
@@ -149,22 +150,37 @@ async def main():
                 break
 
     finally:
-        cap.release()
-        cv2.destroyAllWindows()
-        skeleton_tracker.close()
+        # 1. Release camera and OpenCV resources
+        try:
+            cap.release()
+            cv2.destroyAllWindows()
+            skeleton_tracker.close()
+        except Exception as e:
+            print(f"[Cleanup] Error while releasing vision resources: {e}")
 
+        # 2. Stop MQTT client and cancel related tasks
         if mqtt_client:
-            await mqtt_client.stop()
-
-        if mqtt_task:
-            mqtt_task.cancel()
             try:
-                await mqtt_task
-            except asyncio.CancelledError:
-                pass
+                await mqtt_client.stop()
+            except Exception as e:
+                print(f"[MQTT] Error while stopping client: {e}")
 
-        await ami_trigger.close()
+        for task, name in [(mqtt_task, "listener"), (mqtt_loop_task, "loop")]:
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    print(f"[MQTT] {name.capitalize()} task cancelled successfully.")
+                except Exception as e:
+                    print(f"[MQTT] Error while cancelling {name} task: {e}")
 
+        # 3. Close AMI trigger if connected
+        if ami_trigger and getattr(ami_trigger, "is_connected", False):
+            try:
+                await ami_trigger.close()
+            except Exception as e:
+                print(f"[AMI] Error while closing connection: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
