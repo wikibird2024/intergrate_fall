@@ -4,18 +4,20 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 import asyncio
 import logging
+from telegram.error import TelegramError, RetryAfter, TimedOut, NetworkError
 
 from fall.fall_detector import FallDetector
 from comm.ami_trigger import AMITrigger
 from comm.telegram_bot import TelegramBot
 from database.database_manager import insert_fall_event
 from utils.draw_utils import draw_person
-from telegram.error import TelegramError, RetryAfter, TimedOut, NetworkError
 
 # Thiết lập logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Giới hạn số yêu cầu Telegram đồng thời
+telegram_semaphore = asyncio.Semaphore(5)  # Giới hạn 5 yêu cầu đồng thời
 
 class DetectionProcessor:
     def __init__(self, ami_trigger: AMITrigger, telegram_bot: Optional[TelegramBot]):
@@ -47,7 +49,7 @@ class DetectionProcessor:
             }
             fall_id = insert_fall_event(fall_event)
             alert_msg = f"⚠️ Fall detected by camera for {entity_id}. Event ID: {fall_id}"
-            print(alert_msg)
+            logger.info(alert_msg)
 
             await self.ami_trigger.alert_devices(alert_msg)
             await self._safe_send_telegram(frame, alert_msg)
@@ -72,45 +74,49 @@ class DetectionProcessor:
 
             gps_info = f"{mqtt_msg.get('latitude', 'Unknown')}, {mqtt_msg.get('longitude', 'Unknown')}"
             alert_msg = f"🚨 Fall detected by {entity_id} at GPS: {gps_info}. Event ID: {fall_id}"
-            print(alert_msg)
+            logger.info(alert_msg)
 
             await self.ami_trigger.alert_devices(alert_msg)
             await self._safe_send_telegram(None, alert_msg)  # fallback text-only
             self._update_alert_status(entity_id)
 
     async def _safe_send_telegram(
-        self, frame: Optional[np.ndarray], msg: str, retries: int = 3, delay: float = 1.0
+        self, frame: Optional[np.ndarray], msg: str, retries: int = 3, delay: float = 2.0
     ):
         """Gửi ảnh Telegram an toàn với retry, fallback text nếu frame invalid."""
         if not self.telegram_bot:
             logger.warning("[TELEGRAM] TelegramBot not initialized, skipping send")
             return
 
-        for attempt in range(retries):
-            try:
-                if isinstance(frame, np.ndarray) and frame.size > 0 and frame.shape[0] >= 10 and frame.shape[1] >= 10:
-                    logger.debug(f"[TELEGRAM] Frame shape: {frame.shape}, dtype: {frame.dtype}, size: {frame.size}")
-                    # Thu nhỏ frame nếu quá lớn (giữ tỷ lệ khung hình)
-                    if max(frame.shape[0], frame.shape[1]) > 1080:
-                        scale = 1080 / max(frame.shape[0], frame.shape[1])
-                        frame = cv2.resize(frame, None, fx=scale, fy=scale)
-                    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
-                    success, img_encoded = cv2.imencode(".jpg", frame, encode_param)
-                    if success and len(img_encoded) <= 10 * 1024 * 1024:
-                        await self.telegram_bot.send_photo(frame, msg)
-                        return
-                logger.warning("[TELEGRAM] ⚠️ Frame invalid or too large, sending text only")
-                await self.telegram_bot.send_message(msg)
-                return
-            except (RetryAfter, TimedOut, NetworkError) as e:
-                logger.error(f"[TELEGRAM] ❌ Attempt {attempt + 1} failed (network issue): {e}")
-                await asyncio.sleep(delay)
-            except TelegramError as e:
-                logger.error(f"[TELEGRAM] ❌ Attempt {attempt + 1} failed (Telegram error): {e}")
-                await asyncio.sleep(delay)
-            except Exception as e:
-                logger.error(f"[TELEGRAM] ❌ Attempt {attempt + 1} failed (unexpected): {e}")
-                await asyncio.sleep(delay)
+        async with telegram_semaphore:  # Giới hạn số yêu cầu đồng thời
+            for attempt in range(retries):
+                try:
+                    if isinstance(frame, np.ndarray) and frame.size > 0 and frame.shape[0] >= 10 and frame.shape[1] >= 10:
+                        logger.debug(f"[TELEGRAM] Frame shape: {frame.shape}, dtype: {frame.dtype}, size: {frame.size}")
+                        # Thu nhỏ frame nếu quá lớn (giữ tỷ lệ khung hình)
+                        if max(frame.shape[0], frame.shape[1]) > 1080:
+                            scale = 1080 / max(frame.shape[0], frame.shape[1])
+                            frame = cv2.resize(frame, None, fx=scale, fy=scale)
+                        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 75]  # Giảm chất lượng JPEG
+                        success, img_encoded = cv2.imencode(".jpg", frame, encode_param)
+                        if success:
+                            file_size_mb = len(img_encoded) / (1024 * 1024)
+                            logger.debug(f"[TELEGRAM] Encoded image size: {file_size_mb:.2f} MB")
+                            if file_size_mb <= 10:
+                                await self.telegram_bot.send_photo(frame, msg)
+                                return
+                    logger.warning("[TELEGRAM] ⚠️ Frame invalid or too large, sending text only")
+                    await self.telegram_bot.send_message(msg)
+                    return
+                except (RetryAfter, TimedOut, NetworkError) as e:
+                    logger.error(f"[TELEGRAM] ❌ Attempt {attempt + 1} failed (network issue): {e}")
+                    await asyncio.sleep(delay * (2 ** attempt))  # Exponential backoff
+                except TelegramError as e:
+                    logger.error(f"[TELEGRAM] ❌ Attempt {attempt + 1} failed (Telegram error): {e}")
+                    await asyncio.sleep(delay * (2 ** attempt))
+                except Exception as e:
+                    logger.error(f"[TELEGRAM] ❌ Attempt {attempt + 1} failed (unexpected): {e}")
+                    await asyncio.sleep(delay * (2 ** attempt))
 
         logger.warning("[TELEGRAM] ⚠️ All attempts failed, sending fallback text")
         try:
