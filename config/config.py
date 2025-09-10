@@ -74,7 +74,7 @@ AMI_USERNAME = os.getenv("AMI_USERNAME", "admin")
 AMI_SECRET = os.getenv("AMI_SECRET")
 ENABLE_AMI = os.getenv("ENABLE_AMI", "True").lower() == "true"
 
-EXTENSIONS = os.getenv("EXTENSIONS", "1001, 1002, 1003").split(',')
+EXTENSIONS = ['6001', '6002', '6003']
 ALERT_MESSAGE = os.getenv("ALERT_MESSAGE", "Fall detected! Please check immediately.")
 CALLER_ID = os.getenv("CALLER_ID", "FallAlertSystem <1000>")
 
