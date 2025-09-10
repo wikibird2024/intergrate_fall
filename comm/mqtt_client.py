@@ -1,11 +1,13 @@
 
 import asyncio
+import json
 import aiomqtt
 
 
 class MQTTClient:
     """
     Asynchronous MQTT client for connecting to a broker and handling messages.
+    Parses incoming MQTT payloads as JSON and normalizes them.
     """
 
     def __init__(
@@ -45,8 +47,22 @@ class MQTTClient:
                     async for message in client.messages:
                         try:
                             payload = message.payload.decode()
-                            print(f"[MQTT] 📥 Received: {payload}")
-                            await self.message_queue.put(payload)
+                            data = json.loads(payload)
+
+                            # Chuẩn hóa kiểu dữ liệu
+                            normalized = {
+                                "device_id": data.get("device_id", "unknown"),
+                                "fall_detected": bool(data.get("fall_detected", False)),
+                                "latitude": self._to_float(data.get("latitude")),
+                                "longitude": self._to_float(data.get("longitude")),
+                                "has_gps_fix": self._to_bool(data.get("has_gps_fix")),
+                            }
+
+                            print(f"[MQTT] 📥 Parsed: {normalized}")
+                            await self.message_queue.put(normalized)
+
+                        except json.JSONDecodeError:
+                            print(f"[MQTT] ⚠️ Invalid JSON: {payload}")
                         except Exception as e:
                             print(f"[MQTT] ⚠️ Error parsing message: {e}")
 
@@ -55,5 +71,20 @@ class MQTTClient:
                 await asyncio.sleep(5)
 
     async def get_message(self):
-        """Retrieve message from the internal queue."""
+        """Retrieve message from the internal queue (already normalized dict)."""
         return await self.message_queue.get()
+
+    @staticmethod
+    def _to_float(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _to_bool(value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ("true", "1", "yes", "y")
+        return bool(value)
