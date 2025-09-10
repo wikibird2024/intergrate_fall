@@ -4,75 +4,90 @@ import cv2
 import numpy as np
 import asyncio
 from telegram import Bot
-from telegram.error import TelegramError
+from telegram.error import TelegramError, RetryAfter, TimedOut, NetworkError
 
 class TelegramBot:
     """
-    Async Telegram bot wrapper compatible with python-telegram-bot v22+.
-    Sends messages and OpenCV frames safely with retry and fallback.
+    Async Telegram bot wrapper (v22+) for sending messages and photos.
+    Minimal, robust, retry-safe.
     """
 
     def __init__(self, token: str, chat_id: str, send_test_message: bool = True):
-        self.bot = Bot(token=token)  # v22+ không dùng request_kwargs ở đây
+        self.bot = Bot(token=token)
         self.chat_id = chat_id
 
         if send_test_message:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = asyncio.get_event_loop()
-            loop.create_task(self._send_test_message())
+            asyncio.create_task(self._send_test_message())
 
     async def _send_test_message(self):
         try:
             await self.send_message("✅ Telegram bot initialized successfully.")
             print("[TELEGRAM] Test message sent successfully.")
         except Exception as e:
-            print(f"[TELEGRAM] ⚠️ Failed to send test message during init: {e}")
+            print(f"[TELEGRAM] ⚠️ Test message failed: {e}")
 
-    async def send_message(self, text: str):
-        try:
-            await self.bot.send_message(chat_id=self.chat_id, text=text)
-        except TelegramError as e:
-            print(f"[TELEGRAM] ❌ TelegramError in send_message: {e}")
-        except Exception as e:
-            print(f"[TELEGRAM] ❌ Unexpected error in send_message: {e}")
+    async def send_message(self, text: str, retries: int = 3, delay: float = 1.0):
+        for attempt in range(retries):
+            try:
+                await self.bot.send_message(chat_id=self.chat_id, text=text)
+                return
+            except (RetryAfter, TimedOut, NetworkError) as e:
+                print(f"[TELEGRAM] ⚠️ Attempt {attempt+1} failed: {e}, retrying...")
+                await asyncio.sleep(delay)
+            except TelegramError as e:
+                print(f"[TELEGRAM] ❌ TelegramError: {e}")
+                return
+            except Exception as e:
+                print(f"[TELEGRAM] ❌ Unexpected error: {e}")
+                return
 
     async def send_photo(self, frame: np.ndarray, caption: str = "", retries: int = 3, delay: float = 1.0):
-        if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
-            print("[TELEGRAM] ⚠️ Invalid frame, sending text only")
-            return await self.send_message(caption)
+        if not isinstance(frame, np.ndarray) or frame.size == 0:
+            print("[TELEGRAM] ⚠️ Frame invalid or empty, sending text only")
+            await self.send_message(caption)
+            return
 
         frame_safe = self._prepare_frame(frame)
+        success, img_encoded = cv2.imencode(".jpg", frame_safe)
+        if not success:
+            print("[TELEGRAM] ⚠️ Failed to encode image, sending text only")
+            await self.send_message(caption)
+            return
+
+        photo_bytes = io.BytesIO(img_encoded.tobytes())
+        photo_bytes.name = "image.jpg"
+        photo_bytes.seek(0)
 
         for attempt in range(retries):
             try:
-                success, img_encoded = cv2.imencode(".jpg", frame_safe)
-                if not success:
-                    print("[TELEGRAM] ⚠️ imencode failed, sending text")
-                    return await self.send_message(caption)
-
-                with io.BytesIO(img_encoded.tobytes()) as photo_bytes:
-                    photo_bytes.name = "image.jpg"
-                    photo_bytes.seek(0)
-                    await self.bot.send_photo(chat_id=self.chat_id, photo=photo_bytes, caption=caption)
+                await self.bot.send_photo(chat_id=self.chat_id, photo=photo_bytes, caption=caption)
+                photo_bytes.close()
                 return
-            except Exception as e:
-                print(f"[TELEGRAM] ❌ Attempt {attempt+1} failed: {e}")
+            except (RetryAfter, TimedOut, NetworkError) as e:
+                print(f"[TELEGRAM] ⚠️ Attempt {attempt+1} failed: {e}, retrying...")
                 await asyncio.sleep(delay)
+            except TelegramError as e:
+                print(f"[TELEGRAM] ❌ TelegramError: {e}")
+                break
+            except Exception as e:
+                print(f"[TELEGRAM] ❌ Unexpected error: {e}")
+                break
 
-        try:
-            await self.send_message(caption)
-        except Exception as e:
-            print(f"[TELEGRAM] ❌ Failed sending fallback text: {e}")
+        # fallback
+        photo_bytes.close()
+        await self.send_message(caption)
 
     @staticmethod
     def _prepare_frame(frame: np.ndarray) -> np.ndarray:
-        frame_safe = cv2.convertScaleAbs(frame) if frame.dtype != np.uint8 else frame.copy()
+        """Ensure frame is uint8, 3-channel BGR."""
+        if frame.dtype != np.uint8:
+            frame_safe = cv2.convertScaleAbs(frame)
+        else:
+            frame_safe = frame.copy()
 
-        if frame_safe.ndim == 2:
+        if frame_safe.ndim == 2:  # grayscale
             frame_safe = cv2.cvtColor(frame_safe, cv2.COLOR_GRAY2BGR)
-        elif frame_safe.ndim == 3 and frame_safe.shape[2] == 4:
+        elif frame_safe.ndim == 3 and frame_safe.shape[2] == 4:  # BGRA
             frame_safe = cv2.cvtColor(frame_safe, cv2.COLOR_BGRA2BGR)
 
         return frame_safe
