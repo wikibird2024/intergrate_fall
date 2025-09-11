@@ -34,35 +34,36 @@ class MQTTClient:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.message_queue = asyncio.Queue(maxsize=max_queue_size)
-        self._running = False
-        self._retry_count = 0
-
-    async def start(self):
-        """Start the MQTT client"""
+        self.connected_event = asyncio.Event()
         self._running = True
-        await self.run_forever()
-
-    async def stop(self):
-        """Stop the MQTT client gracefully"""
-        self._running = False
-        logger.info("MQTT client stopping...")
+        self._retry_count = 0
 
     async def run_forever(self):
         """
-        Main loop: connect to broker, subscribe and process incoming messages.
-        Will retry on failure with limit.
+        Main loop: connects to the broker, subscribes to the topic,
+        and processes incoming messages. It includes an automatic reconnect
+        mechanism on failure.
         """
+        logger.info(f"[MQTT] Starting connection to {self.broker}:{self.port}")
+        logger.info(f"[MQTT] Topic: {self.topic}")
+        logger.info(f"[MQTT] Username: {self.username}")
+        logger.info(f"[MQTT] Password provided: {'Yes' if self.password else 'No'}")
+        
         while self._running and self._retry_count < self.max_retries:
             try:
+                logger.info(f"[MQTT] Connection attempt {self._retry_count + 1}/{self.max_retries}")
+                
                 async with aiomqtt.Client(
                     hostname=self.broker,
                     port=self.port,
                     username=self.username,
                     password=self.password,
                 ) as client:
-                    logger.info(f"Connected to {self.broker}:{self.port}")
+                    logger.info(f"[MQTT] ✅ Connected to {self.broker}:{self.port}")
+                    self.connected_event.set()
+                    
                     await client.subscribe(self.topic, qos=self.qos)
-                    logger.info(f"Subscribed to {self.topic} (QoS={self.qos})")
+                    logger.info(f"[MQTT] ✅ Subscribed to {self.topic} (QoS={self.qos})")
                     
                     # Reset retry count on successful connection
                     self._retry_count = 0
@@ -70,90 +71,124 @@ class MQTTClient:
                     async for message in client.messages:
                         if not self._running:
                             break
-                            
                         await self._process_message(message)
-                        
-            except asyncio.CancelledError:
-                logger.info("MQTT client cancelled")
-                break
-            except Exception as e:
+            
+            except aiomqtt.MqttError as e:
+                self.connected_event.clear()
                 self._retry_count += 1
-                logger.error(f"Connection error (attempt {self._retry_count}/{self.max_retries}): {e}")
-                
+                logger.error(f"[MQTT] ❌ MQTT error (attempt {self._retry_count}/{self.max_retries}): {e}")
                 if self._retry_count < self.max_retries:
-                    logger.info(f"Retrying in {self.retry_delay}s...")
+                    logger.info(f"[MQTT] ⏳ Retrying in {self.retry_delay}s...")
                     await asyncio.sleep(self.retry_delay)
                 else:
-                    logger.error("Max retries reached, stopping client")
-                    break
+                    logger.error("[MQTT] ❌ Max retries reached, stopping client.")
+                    self._running = False
 
-    async def _process_message(self, message):
-        """Process individual MQTT message"""
+            except asyncio.CancelledError:
+                logger.info("[MQTT] 🛑 MQTT client task cancelled.")
+                self._running = False
+                break
+                
+            except Exception as e:
+                self.connected_event.clear()
+                self._retry_count += 1
+                logger.error(f"[MQTT] ❌ Unexpected error (attempt {self._retry_count}/{self.max_retries}): {e}", exc_info=True)
+                if self._retry_count < self.max_retries:
+                    logger.info(f"[MQTT] ⏳ Retrying in {self.retry_delay}s...")
+                    await asyncio.sleep(self.retry_delay)
+                else:
+                    logger.error("[MQTT] ❌ Max retries reached, stopping client.")
+                    self._running = False
+
+        logger.info("[MQTT] 🏁 MQTT client loop ended")
+
+    async def stop(self):
+        """Stop the MQTT client gracefully."""
+        logger.info("[MQTT] 🛑 Stopping MQTT client...")
+        self._running = False
+
+    async def _process_message(self, message: aiomqtt.Message):
+        """Processes an individual MQTT message, decodes, and queues it."""
         try:
             raw_payload = message.payload.decode(errors="ignore")
-            logger.debug(f"Raw message on {message.topic}: {raw_payload}")
+            logger.info(f"[MQTT] 📨 Raw message on {message.topic}: {raw_payload}")
             
             try:
                 data = json.loads(raw_payload)
                 normalized = self._normalize_data(data)
-                logger.debug(f"Parsed: {normalized}")
+                logger.info(f"[MQTT] ✅ Parsed and normalized: {normalized}")
                 
-                # Non-blocking put with timeout
                 try:
                     await asyncio.wait_for(
-                        self.message_queue.put(normalized), 
+                        self.message_queue.put(normalized),
                         timeout=1.0
                     )
+                    logger.info(f"[MQTT] 📥 Queued message successfully")
                 except asyncio.TimeoutError:
-                    logger.warning("Message queue full, dropping message")
+                    logger.warning("[MQTT] ⚠️ Message queue full, dropping message.")
                     
-            except json.JSONDecodeError:
-                logger.warning(f"Invalid JSON: {raw_payload}")
+            except json.JSONDecodeError as e:
+                logger.warning(f"[MQTT] ⚠️ Invalid JSON payload: {raw_payload} - Error: {e}")
             except Exception as e:
-                logger.error(f"Error parsing message: {e}")
+                logger.error(f"[MQTT] ❌ Error parsing/queuing message: {e}", exc_info=True)
                 
         except Exception as e:
-            logger.error(f"Error processing message: {e}")
+            logger.error(f"[MQTT] ❌ Error processing message: {e}", exc_info=True)
 
     def _normalize_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize incoming data"""
-        return {
-            "device_id": data.get("device_id", "unknown"),
-            "fall_detected": bool(data.get("fall_detected", False)),
-            "latitude": self._to_float(data.get("latitude")),
-            "longitude": self._to_float(data.get("longitude")),
-            "has_gps_fix": self._to_bool(data.get("has_gps_fix")),
-            "timestamp": data.get("timestamp")  # Preserve original timestamp if exists
-        }
+        """Normalize incoming data to standard format."""
+        try:
+            normalized = {
+                "device_id": data.get("device_id", "unknown"),
+                "fall_detected": self._to_bool(data.get("fall_detected", False)),
+                "latitude": self._to_float(data.get("latitude")),
+                "longitude": self._to_float(data.get("longitude")),
+                "has_gps_fix": self._to_bool(data.get("has_gps_fix", False)),
+                "timestamp": data.get("timestamp"),
+                "raw_data": data  # Keep original for debugging
+            }
+            return normalized
+        except Exception as e:
+            logger.error(f"[MQTT] ❌ Error normalizing data: {e}", exc_info=True)
+            # Return minimal normalized structure
+            return {
+                "device_id": "unknown",
+                "fall_detected": False,
+                "latitude": 0.0,
+                "longitude": 0.0,
+                "has_gps_fix": False,
+                "timestamp": None,
+                "raw_data": data
+            }
 
     async def get_message(self, timeout: Optional[float] = None) -> Dict[str, Any]:
         """
-        Retrieve message from the internal queue (already normalized dict).
-        
-        Args:
-            timeout: Maximum time to wait for a message (None = wait forever)
-            
-        Returns:
-            Normalized message dictionary
-            
-        Raises:
-            asyncio.TimeoutError: If timeout is reached
+        Retrieves a message from the internal queue.
+        Waits for the client to be connected before trying to get a message.
         """
+        logger.debug("[MQTT] 🔍 Waiting for connection before getting message...")
+        await self.connected_event.wait()
+        logger.debug("[MQTT] 🔍 Connection ready, getting message from queue...")
+        
         if timeout is not None:
             return await asyncio.wait_for(self.message_queue.get(), timeout=timeout)
         return await self.message_queue.get()
 
     def get_queue_size(self) -> int:
-        """Get current queue size"""
+        """Returns the current size of the message queue."""
         return self.message_queue.qsize()
 
     def is_running(self) -> bool:
-        """Check if client is running"""
+        """Checks if the client is set to run."""
         return self._running
+
+    def is_connected(self) -> bool:
+        """Checks if the client is connected."""
+        return self.connected_event.is_set()
 
     @staticmethod
     def _to_float(value) -> float:
-        """Convert value to float with fallback"""
+        """Converts a value to float with a safe fallback."""
         if value is None:
             return 0.0
         try:
@@ -163,7 +198,7 @@ class MQTTClient:
 
     @staticmethod
     def _to_bool(value) -> bool:
-        """Convert value to boolean with smart parsing"""
+        """Converts a value to boolean with smart parsing."""
         if value is None:
             return False
         if isinstance(value, bool):
@@ -174,39 +209,3 @@ class MQTTClient:
             return bool(int(value))
         except (ValueError, TypeError):
             return bool(value)
-
-# Example usage
-async def main():
-    client = MQTTClient(
-        broker="localhost",
-        port=1883,
-        topic="fall/detection",
-        max_queue_size=500
-    )
-    
-    # Start client in background
-    client_task = asyncio.create_task(client.start())
-    
-    try:
-        # Process messages
-        while client.is_running():
-            try:
-                message = await client.get_message(timeout=5.0)
-                print(f"Received: {message}")
-            except asyncio.TimeoutError:
-                print("No message received in 5 seconds")
-            except Exception as e:
-                logger.error(f"Error getting message: {e}")
-                
-    except KeyboardInterrupt:
-        print("Shutting down...")
-    finally:
-        await client.stop()
-        client_task.cancel()
-        try:
-            await client_task
-        except asyncio.CancelledError:
-            pass
-
-if __name__ == "__main__":
-    asyncio.run(main())

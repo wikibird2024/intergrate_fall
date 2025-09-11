@@ -25,45 +25,86 @@ from config.config import (
 )
 
 
-async def mqtt_processor_loop(mqtt_client: MQTTClient, detection_processor: DetectionProcessor):
-    """
-    Background task to process MQTT messages from the queue.
-    """
-    print("[MQTT] 🔄 Processor started")
+async def camera_processing_loop(human_detector, skeleton_tracker, person_tracker, detection_processor):
+    """Camera processing loop that can be cancelled."""
+    cap = None
+    
+    try:
+        # Initialize camera with fallback
+        camera_sources = [0, 1, 2, '/dev/video0', '/dev/video1']
+        
+        for source in camera_sources:
+            print(f"[CAMERA] Trying camera source: {source}")
+            cap = cv2.VideoCapture(source)
+            
+            if cap.isOpened():
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    print(f"[CAMERA] ✅ Successfully opened camera: {source}")
+                    break
+                else:
+                    print(f"[CAMERA] ⚠️ Camera {source} opened but cannot read frames")
+                    cap.release()
+                    cap = None
+            else:
+                print(f"[CAMERA] ❌ Cannot open camera: {source}")
+                cap = None
+        
+        if not cap:
+            print("[CAMERA] ⚠️ No working camera found, camera loop will exit")
+            return
+        
+        # Main camera processing loop
+        frame_count = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                print("[CAMERA] ⚠️ Failed to read frame")
+                break
+
+            # Process frame
+            detected_boxes = human_detector.detect_humans(frame)
+            tracked_people = person_tracker.update(detected_boxes)
+
+            for person_id, box in tracked_people:
+                landmarks = skeleton_tracker.track_from_box(frame, box)
+                await detection_processor.handle_camera_data(frame, person_id, box, landmarks)
+
+            # Display frame
+            cv2.imshow("Fall Detection", frame)
+            
+            # Non-blocking key check
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                print("[CAMERA] User pressed 'q', stopping camera processing...")
+                break
+                
+            frame_count += 1
+            if frame_count % 100 == 0:
+                print(f"[CAMERA] Processed {frame_count} frames")
+                
+            # Allow other tasks to run
+            await asyncio.sleep(0.001)
+
+    except asyncio.CancelledError:
+        print("[CAMERA] Camera processing task cancelled")
+    except Exception as e:
+        print(f"[CAMERA] Error in camera processing: {e}")
+    finally:
+        if cap:
+            print("[CAMERA] Releasing camera...")
+            cap.release()
+            cv2.destroyAllWindows()
+
+
+async def heartbeat_loop():
+    """Heartbeat loop to keep program alive and show it's working."""
     try:
         while True:
-            mqtt_msg = await mqtt_client.get_message()
-            print(f"[MQTT] 📨 Processing message: {mqtt_msg}")
-            await detection_processor.handle_mqtt_data(mqtt_msg)
+            await asyncio.sleep(60)  # Every 30 seconds
+            print("[SYSTEM] 💓 System heartbeat - all tasks running")
     except asyncio.CancelledError:
-        print("[MQTT] Processor task cancelled.")
-    except Exception as e:
-        print(f"[MQTT] Processor error: {e}")
-        raise
-
-
-def init_camera_with_fallback():
-    """Initialize camera with multiple fallback options."""
-    camera_sources = [0, 1, 2, '/dev/video0', '/dev/video1']
-    
-    for source in camera_sources:
-        print(f"[CAMERA] Trying camera source: {source}")
-        cap = cv2.VideoCapture(source)
-        
-        if cap.isOpened():
-            # Test if we can actually read frames
-            ret, frame = cap.read()
-            if ret and frame is not None:
-                print(f"[CAMERA] ✅ Successfully opened camera: {source}")
-                return cap, True
-            else:
-                print(f"[CAMERA] ⚠️ Camera {source} opened but cannot read frames")
-                cap.release()
-        else:
-            print(f"[CAMERA] ❌ Cannot open camera: {source}")
-    
-    print("[CAMERA] ⚠️ No working camera found, running in MQTT-only mode")
-    return None, False
+        print("[SYSTEM] Heartbeat cancelled")
 
 
 async def main():
@@ -71,11 +112,9 @@ async def main():
     
     # Global variables for cleanup
     mqtt_client = None
-    mqtt_listener_task = None
-    mqtt_processor_job = None
-    cap = None
     skeleton_tracker = None
     ami_trigger = None
+    tasks = []
 
     try:
         # 1. Initialize modules
@@ -105,7 +144,7 @@ async def main():
         create_table()
         print("[DB] Database and table created successfully.")
 
-        # 3. Start MQTT (if enabled) - MOVED BEFORE CAMERA
+        # 3. Start MQTT tasks (if enabled)
         if ENABLE_MQTT:
             try:
                 print(f"[MQTT] 🔄 Starting MQTT client for {MQTT_BROKER_HOST}:{MQTT_BROKER_PORT}, topic={MQTT_TOPIC}")
@@ -117,22 +156,25 @@ async def main():
                     password=MQTT_PASSWORD,
                 )
                 
-                # Start MQTT tasks
-                mqtt_listener_task = asyncio.create_task(mqtt_client.run_forever())
-                mqtt_processor_job = asyncio.create_task(
-                    mqtt_processor_loop(mqtt_client, detection_processor)
-                )
-                
-                # Give MQTT some time to connect
-                print("[MQTT] ⏳ Waiting for MQTT connection...")
-                await asyncio.sleep(2)
-                print("[MQTT] ✅ MQTT tasks started successfully")
-                
+                tasks.append(asyncio.create_task(mqtt_client.run_forever(), name="mqtt_listener"))
+                print("[MQTT] ✅ MQTT listener task created")
+
             except Exception as e:
                 print(f"[MQTT] ⚠️ Could not start MQTT: {e}")
                 mqtt_client = None
         else:
             print("[MQTT] Disabled by configuration.")
+
+        # Wait for MQTT connection before starting the processor
+        if mqtt_client:
+            print("[MQTT] ⏳ Waiting for MQTT client to connect...")
+            try:
+                await asyncio.wait_for(mqtt_client.connected_event.wait(), timeout=10)
+                print("[MQTT] ✅ MQTT client connected.")
+                tasks.append(asyncio.create_task(mqtt_processor_loop(mqtt_client, detection_processor), name="mqtt_processor"))
+                print("[MQTT] ✅ MQTT processor task created")
+            except asyncio.TimeoutError:
+                print("[MQTT] ❌ Timeout waiting for MQTT connection. Proceeding without MQTT processing.")
 
         # 4. Connect AMI trigger
         if ENABLE_AMI:
@@ -142,20 +184,46 @@ async def main():
                 print(f"[AMI] ❌ Error connecting to AMI: {e}. Proceeding without AMI functionality.")
                 ami_trigger.is_connected = False
         else:
-            print("[AMI] AMI functionality is disabled. Proceeding without AMI.")
+            print("[AMI] AMI functionality is disabled.")
             ami_trigger.is_connected = False
 
-        # 5. Initialize camera (with fallback)
-        print("[CAMERA] Opening video capture...")
-        cap, camera_available = init_camera_with_fallback()
+        # 5. Start camera processing task
+        print("[CAMERA] Starting camera processing task...")
+        camera_task = asyncio.create_task(
+            camera_processing_loop(human_detector, skeleton_tracker, person_tracker, detection_processor),
+            name="camera_processing"
+        )
+        tasks.append(camera_task)
 
-        # 6. Main processing loop
-        if camera_available and cap:
-            print("[SYSTEM] ✅ Running in CAMERA + MQTT mode")
-            await run_camera_mode(cap, human_detector, skeleton_tracker, person_tracker, detection_processor)
-        else:
-            print("[SYSTEM] ✅ Running in MQTT-ONLY mode")
-            await run_mqtt_only_mode()
+        # 6. Start heartbeat task
+        heartbeat_task = asyncio.create_task(heartbeat_loop(), name="heartbeat")
+        tasks.append(heartbeat_task)
+
+        # 7. Wait for any task to complete or fail
+        print(f"[SYSTEM] ✅ Starting {len(tasks)} concurrent tasks...")
+        print("[SYSTEM] 📌 Tasks:", [task.get_name() for task in tasks])
+        print("[SYSTEM] Press Ctrl+C to shutdown gracefully")
+        
+        done, pending = await asyncio.wait(
+            tasks, 
+            return_when=asyncio.FIRST_COMPLETED
+        )
+        
+        # Check what completed
+        for task in done:
+            if task.exception():
+                print(f"[SYSTEM] ❌ Task {task.get_name()} failed with exception: {task.exception()}")
+            else:
+                print(f"[SYSTEM] ✅ Task {task.get_name()} completed normally.")
+
+        # Cancel remaining tasks
+        print(f"[SYSTEM] 🛑 Cancelling {len(pending)} remaining tasks...")
+        for task in pending:
+            task.cancel()
+
+        # Wait for cancellation to complete
+        if pending:
+            await asyncio.wait(pending, timeout=5.0)
 
     except KeyboardInterrupt:
         print("[SYSTEM] 🛑 Keyboard interrupt received")
@@ -164,105 +232,60 @@ async def main():
         import traceback
         traceback.print_exc()
     finally:
-        # Comprehensive cleanup logic
-        await cleanup_resources(cap, skeleton_tracker, mqtt_listener_task, mqtt_processor_job, ami_trigger)
+        # Final cleanup
+        await cleanup_resources(skeleton_tracker, ami_trigger)
 
 
-async def run_camera_mode(cap, human_detector, skeleton_tracker, person_tracker, detection_processor):
-    """Run main loop with camera processing."""
+async def mqtt_processor_loop(mqtt_client: MQTTClient, detection_processor: DetectionProcessor):
+    """
+    Background task to process MQTT messages from the queue.
+    This version correctly uses the MQTTClient's is_running flag.
+    """
+    print("[MQTT] 🔄 Processor started")
     try:
-        frame_count = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("[CAMERA] ⚠️ Failed to read frame, attempting to reconnect...")
-                break
-
-            # Process every frame (you can add frame skipping if needed)
-            detected_boxes = human_detector.detect_humans(frame)
-            tracked_people = person_tracker.update(detected_boxes)
-
-            for person_id, box in tracked_people:
-                landmarks = skeleton_tracker.track_from_box(frame, box)
-                await detection_processor.handle_camera_data(frame, person_id, box, landmarks)
-
-            cv2.imshow("Fall Detection", frame)
-            
-            # Check for 'q' key press
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
-                print("[CAMERA] User pressed 'q', exiting...")
-                break
-                
-            frame_count += 1
-            if frame_count % 100 == 0:  # Log every 100 frames
-                print(f"[CAMERA] Processed {frame_count} frames")
-
+        while mqtt_client.is_running():
+            try:
+                mqtt_msg = await mqtt_client.get_message(timeout=1.0)
+                print(f"[MQTT] 📨 Processing message: {mqtt_msg}")
+                await detection_processor.handle_mqtt_data(mqtt_msg)
+            except asyncio.TimeoutError:
+                # No message received in the last second, continue the loop
+                pass
+    except asyncio.CancelledError:
+        print("[MQTT] Processor task cancelled.")
     except Exception as e:
-        print(f"[CAMERA] Error in camera mode: {e}")
+        print(f"[MQTT] Processor error: {e}")
+        raise
 
 
-async def run_mqtt_only_mode():
-    """Run in MQTT-only mode when camera is not available."""
-    print("[SYSTEM] 📡 MQTT-only mode active. Press Ctrl+C to exit.")
-    try:
-        while True:
-            await asyncio.sleep(10)  # Keep the program alive
-            print("[SYSTEM] 💓 MQTT-only mode heartbeat")
-    except KeyboardInterrupt:
-        print("[SYSTEM] MQTT-only mode interrupted")
-
-
-async def cleanup_resources(cap, skeleton_tracker, mqtt_listener_task, mqtt_processor_job, ami_trigger):
-    """Comprehensive cleanup of all resources."""
-    print("[SYSTEM] 🧹 Cleaning up resources...")
-
-    # Cleanup camera
-    if cap:
-        print("[CAMERA] Releasing camera...")
-        cap.release()
-        cv2.destroyAllWindows()
+async def cleanup_resources(skeleton_tracker, ami_trigger):
+    """Final cleanup of resources that need explicit closing."""
+    print("[SYSTEM] 🧹 Final cleanup...")
 
     # Cleanup skeleton tracker
     if skeleton_tracker:
-        print("[SKELETON] Closing skeleton tracker...")
         try:
             skeleton_tracker.close()
+            print("[SKELETON] ✅ Skeleton tracker closed")
         except Exception as e:
-            print(f"[SKELETON] Error closing: {e}")
-
-    # Cleanup MQTT tasks
-    cleanup_tasks = []
-    
-    if mqtt_listener_task and not mqtt_listener_task.done():
-        print("[MQTT] Cancelling listener task...")
-        mqtt_listener_task.cancel()
-        cleanup_tasks.append(mqtt_listener_task)
-
-    if mqtt_processor_job and not mqtt_processor_job.done():
-        print("[MQTT] Cancelling processor task...")
-        mqtt_processor_job.cancel()
-        cleanup_tasks.append(mqtt_processor_job)
-
-    # Wait for all tasks to complete
-    if cleanup_tasks:
-        try:
-            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
-            print("[MQTT] All MQTT tasks cleaned up successfully.")
-        except Exception as e:
-            print(f"[MQTT] Error during cleanup: {e}")
+            print(f"[SKELETON] ⚠️ Error closing: {e}")
 
     # Cleanup AMI
     if ami_trigger and getattr(ami_trigger, "is_connected", False):
-        print("[AMI] Closing AMI connection...")
         try:
             await ami_trigger.close()
+            print("[AMI] ✅ AMI connection closed")
         except Exception as e:
-            print(f"[AMI] Error closing: {e}")
+            print(f"[AMI] ⚠️ Error closing: {e}")
 
     print("[SYSTEM] ✅ Cleanup completed")
 
 
 if __name__ == "__main__":
     print("[SYSTEM] 🚀 Starting Fall Detection System...")
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("[SYSTEM] 🛑 Program interrupted by user")
+    finally:
+        print("[SYSTEM] 👋 Goodbye!")
