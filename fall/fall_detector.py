@@ -1,21 +1,25 @@
-
-# fall/fall_detector.py
 import math
 from typing import List, Tuple, Optional
 
 class FallDetector:
+    """
+    Class to detect falls based on torso angle and vertical velocity
+    from a person's body landmarks.
+    """
     def __init__(
         self,
-        torso_angle_threshold: float = 60.0,   # degrees
-        velocity_threshold: float = 0.5,       # pixels/frame (not normalized by fps)
-        fall_duration_threshold: int = 15,     # consecutive frames
-        fall_state_duration_threshold: int = 30 # frames lying down
+        torso_angle_threshold: float = 60.0,    # degrees, balanced for better detection
+        velocity_threshold: float = 0.1,        # pixels/frame, kept low
+        fall_duration_threshold: int = 5,       # consecutive frames, kept low
+        fall_state_duration_threshold: int = 5, # frames lying down, kept low
+        min_landmark_confidence: float = 0.5    # Lowered confidence threshold
     ):
         # Thresholds
         self.TORSO_ANGLE_THRESHOLD = torso_angle_threshold
         self.VELOCITY_THRESHOLD = velocity_threshold
         self.FALL_DURATION_THRESHOLD = fall_duration_threshold
         self.FALL_STATE_DURATION_THRESHOLD = fall_state_duration_threshold
+        self.MIN_LANDMARK_CONFIDENCE = min_landmark_confidence
         
         # Internal states
         self.consecutive_frames_fallen: int = 0
@@ -87,25 +91,49 @@ class FallDetector:
         """
         Detects a fall event. Returns True if confirmed.
         """
-        if not landmarks:
+        if not landmarks or len(landmarks) < 33:
+            self.reset()
             return False
 
-        torso_angle = self._calculate_torso_angle(landmarks)
-        vertical_velocity = self._calculate_vertical_velocity(landmarks)
+        # Kiểm tra độ tin cậy của các điểm mốc quan trọng (vai và hông)
+        relevant_landmarks = [
+            landmarks[self.LEFT_SHOULDER],
+            landmarks[self.RIGHT_SHOULDER],
+            landmarks[self.LEFT_HIP],
+            landmarks[self.RIGHT_HIP],
+        ]
+        
+        # Chỉ kiểm tra nếu các landmarks có độ tin cậy được cung cấp
+        if all(len(lm) > 2 for lm in relevant_landmarks):
+            if not all(lm[2] > self.MIN_LANDMARK_CONFIDENCE for lm in relevant_landmarks):
+                self.reset()
+                return False
 
-        # Initial fall condition
-        if torso_angle > self.TORSO_ANGLE_THRESHOLD and vertical_velocity > self.VELOCITY_THRESHOLD:
+        # Chuyển đổi sang định dạng (x, y) để tính toán
+        landmark_coords = [(lm[0], lm[1]) for lm in landmarks]
+        
+        torso_angle = self._calculate_torso_angle(landmark_coords)
+        vertical_velocity = self._calculate_vertical_velocity(landmark_coords)
+
+        # Giai đoạn 1: Phát hiện chuyển động ngã
+        is_falling = (torso_angle > self.TORSO_ANGLE_THRESHOLD and vertical_velocity > self.VELOCITY_THRESHOLD)
+        
+        # Giai đoạn 2: Phát hiện trạng thái nằm với ngưỡng mới
+        is_lying_down = (torso_angle > self.TORSO_ANGLE_THRESHOLD + 10) # 70 độ
+
+        if is_falling:
             self.consecutive_frames_fallen += 1
-        else:
+            self.frames_in_fall_state = 0
+        elif is_lying_down:
             self.consecutive_frames_fallen = 0
-
-        # Fall state (lying down)
-        if torso_angle > 80:
             self.frames_in_fall_state += 1
         else:
+            self.consecutive_frames_fallen = 0
             self.frames_in_fall_state = 0
 
-        return (
+        is_fall_detected = (
             self.consecutive_frames_fallen >= self.FALL_DURATION_THRESHOLD
             or self.frames_in_fall_state >= self.FALL_STATE_DURATION_THRESHOLD
         )
+        
+        return is_fall_detected
