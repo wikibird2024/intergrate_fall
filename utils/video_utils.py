@@ -137,7 +137,8 @@ def get_video_source(priority_sources):
                     cap.release()
             except Exception as e:
                 logger.error(f"[VIDEO] An unexpected error occurred with webcam {source}: {e}")
-                
+                continue  # Sửa: Thêm 'continue' để tiếp tục vòng lặp sau khi gặp lỗi
+
     logger.error("[VIDEO] No valid video source found")
     return None
 
