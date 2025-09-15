@@ -192,12 +192,15 @@ class DetectionProcessor:
         }
 
     async def _insert_fall_event_with_retry(self, event: Dict[str, Any], retries: int = 3) -> Optional[int]:
-        """Insert fall event with retries."""
+        """Insert fall event with retries in a thread to avoid blocking the event loop."""
         for attempt in range(retries):
             try:
-                return insert_fall_event(event)
+                # Chạy blocking DB call trong thread pool
+                last_id = await asyncio.to_thread(insert_fall_event, event)
+                return last_id
             except Exception as e:
                 logger.warning(f"[DB] Insert failed (attempt {attempt + 1}): {e}")
+                # Exponential backoff
                 await asyncio.sleep(1 * (2 ** attempt))
         logger.error("[DB] All insert retries failed")
         return None
