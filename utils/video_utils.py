@@ -107,7 +107,7 @@ class ESP32StreamWrapper:
 
 # ---
 
-def get_video_source(priority_sources):
+def find_and_connect_source(priority_sources):
     """
     Attempt to open a video source from a list of priority sources.
     Returns either an ESP32StreamWrapper or cv2.VideoCapture object.

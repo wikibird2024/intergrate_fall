@@ -26,7 +26,6 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")      # bí mật -> .env
 # ==============================
 # Video Sources (centralized configuration)
 # ==============================
-
 def get_video_sources():
     """
     Load video sources based on priority:
@@ -42,16 +41,13 @@ def get_video_sources():
     if stream_url:
         sources.append(stream_url)
     
-    # Hardcode external webcam device (e.g., /dev/video2)
-    sources.append(2) 
-    
-    # Hardcode the default laptop webcam
-    sources.append(0)
-
-    # Add a fallback for other common external webcams
-    sources.append(1)
+    # Add prioritized webcam indices
+    sources.append(2)  # External webcam
+    sources.append(0)  # Laptop's default webcam
+    sources.append(1)  # Alternative external webcam fallback
 
     return sources
+
 # ==============================
 # Debug / Logging
 # ==============================

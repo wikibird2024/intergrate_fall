@@ -17,7 +17,9 @@ from comm.ami_trigger import AMITrigger
 from comm.telegram_bot import TelegramBot
 from utils.draw_utils import draw_bounding_box, draw_skeleton
 from database.database_manager import create_table
-from utils.video_utils import get_video_source
+from utils.video_utils import find_and_connect_source
+# Thêm nhập hàm cấu hình nguồn video
+from config.config import get_video_sources
 
 # Import all configuration variables
 from config.config import (
@@ -26,8 +28,6 @@ from config.config import (
     HUMAN_DETECTION_CONFIDENCE_THRESHOLD, IOU_THRESHOLD, POSE_MODEL_COMPLEXITY, POSE_MIN_DETECTION_CONFIDENCE,
     POSE_MIN_TRACKING_CONFIDENCE, ENABLE_TELEGRAM, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 )
-# Thêm dòng này để nhập hàm cấu hình nguồn video
-from config.config import get_video_sources
 
 # Setup logger
 logging.basicConfig(
@@ -221,7 +221,7 @@ async def main():
 
         # Get camera source
         source_priority_list = get_video_sources()
-        cap = get_video_source(source_priority_list)
+        cap = find_and_connect_source(source_priority_list)
 
         # Start camera processing task
         camera_task = asyncio.create_task(
