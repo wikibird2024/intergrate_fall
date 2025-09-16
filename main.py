@@ -1,4 +1,3 @@
-
 import cv2
 import asyncio
 from datetime import datetime
@@ -25,9 +24,10 @@ from config.config import (
     MQTT_BROKER_HOST, MQTT_BROKER_PORT, MQTT_TOPIC, MQTT_USERNAME, MQTT_PASSWORD, ENABLE_MQTT,
     AMI_HOST, AMI_PORT, AMI_USERNAME, AMI_SECRET, ENABLE_AMI,
     HUMAN_DETECTION_CONFIDENCE_THRESHOLD, IOU_THRESHOLD, POSE_MODEL_COMPLEXITY, POSE_MIN_DETECTION_CONFIDENCE,
-    POSE_MIN_TRACKING_CONFIDENCE, ENABLE_TELEGRAM, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
-    VIDEO_SOURCES
+    POSE_MIN_TRACKING_CONFIDENCE, ENABLE_TELEGRAM, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 )
+# Thêm dòng này để nhập hàm cấu hình nguồn video
+from config.config import get_video_sources
 
 # Setup logger
 logging.basicConfig(
@@ -220,7 +220,8 @@ async def main():
             ami_trigger.is_connected = False
 
         # Get camera source
-        cap = get_video_source(VIDEO_SOURCES)
+        source_priority_list = get_video_sources()
+        cap = get_video_source(source_priority_list)
 
         # Start camera processing task
         camera_task = asyncio.create_task(

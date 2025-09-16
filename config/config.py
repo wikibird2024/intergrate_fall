@@ -24,29 +24,34 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # bí mật -> .env
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")      # bí mật -> .env
 
 # ==============================
-# Video Sources (simple + practical)
+# Video Sources (centralized configuration)
 # ==============================
-VIDEO_SOURCES = []
-
-# 1. ESP32-CAM HTTP stream (env variable, nếu có)
-stream_url = os.getenv("VIDEO_STREAM_URL")
-if stream_url:
-    VIDEO_SOURCES.append(stream_url)
-
-# 2. Webcam USB gắn ngoài (index 1), nếu có
-VIDEO_SOURCES.append(1)
-
-# 3. Webcam mặc định của laptop (index 0) – fallback
-VIDEO_SOURCES.append(0)
-
 
 def get_video_sources():
     """
-    Trả về danh sách nguồn video theo thứ tự ưu tiên:
-    HTTP stream (nếu có) -> webcam ngoài (1) -> webcam mặc định (0).
+    Load video sources based on priority:
+    1. HTTP stream from environment variable (if set).
+    2. External USB webcam (index 2).
+    3. Laptop's default webcam (index 0).
+    4. Alternative external webcam (index 1).
     """
-    return VIDEO_SOURCES
+    sources = []
+    
+    # Check for ESP32-CAM stream URL
+    stream_url = os.getenv("VIDEO_STREAM_URL")
+    if stream_url:
+        sources.append(stream_url)
+    
+    # Hardcode external webcam device (e.g., /dev/video2)
+    sources.append(2) 
+    
+    # Hardcode the default laptop webcam
+    sources.append(0)
 
+    # Add a fallback for other common external webcams
+    sources.append(1)
+
+    return sources
 # ==============================
 # Debug / Logging
 # ==============================
