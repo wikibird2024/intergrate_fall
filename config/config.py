@@ -1,9 +1,18 @@
 
 import os
 from dotenv import load_dotenv
-
 # Load environment variables from .env
 load_dotenv()
+
+# ==============================
+# FallDetector thresholds
+# ==============================
+TORSO_ANGLE_THRESHOLD_VERTICAL: float = 60.0      # Maximum torso tilt (degrees) to consider upright
+TORSO_ANGLE_THRESHOLD_HORIZONTAL: float = 45.0    # Maximum torso tilt (degrees) sideways to consider upright
+VELOCITY_THRESHOLD: float = 0.5                    # Minimum torso velocity (units/frame) to detect falling
+FALL_DURATION_THRESHOLD: int = 5                   # Consecutive frames exceeding fall criteria to confirm fall
+FALL_STATE_DURATION_THRESHOLD: int = 5             # Frames lying down to confirm fall state
+MIN_LANDMARK_CONFIDENCE: float = 0.5               # Minimum confidence for key landmarks (shoulders, hips)
 
 # ==============================
 # MQTT Configuration
