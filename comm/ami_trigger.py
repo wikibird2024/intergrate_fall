@@ -1,9 +1,10 @@
 import asyncio
 from panoramisk.manager import Manager
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 # Import configuration from a centralized file.
+# Vẫn import ALERT_MESSAGE để tương thích ngược với các file khác.
 from config.config import EXTENSIONS, ALERT_MESSAGE, CALLER_ID
 
 # Setup logging for the module
@@ -16,7 +17,7 @@ class AMITrigger:
             host=host, port=port, username=username, secret=secret
         )
         self.extensions = EXTENSIONS
-        self.alert_message = ALERT_MESSAGE
+        self.alert_message = ALERT_MESSAGE  # Vẫn giữ để không phá vỡ các file khác
         self.caller_id = CALLER_ID
         self.is_connected = False
         
@@ -39,10 +40,11 @@ class AMITrigger:
             self.is_connected = False
             raise
 
+    # Chỉ refactor phần này để nhận tin nhắn động
     async def alert_devices(self, message: str):
         """
         Triggers a multi-channel alert by initiating calls and sending messages to a list of extensions.
-        This method now combines both call and message actions using asyncio.gather.
+        This method now receives a dynamic message as a parameter.
         """
         if not self.is_connected:
             logger.warning("[AMI] ⚠️ Not connected to AMI. Alert not sent.")
@@ -50,17 +52,20 @@ class AMITrigger:
 
         logger.info(f"[AMI] Triggering alert to {len(self.extensions)} device(s)...")
 
-        tasks = [self._handle_extension(extension) for extension in self.extensions]
+        # Truyền tin nhắn động vào hàm handle_extension
+        tasks = [self._handle_extension(extension, message) for extension in self.extensions]
         await asyncio.gather(*tasks)
 
-    async def _handle_extension(self, extension: str):
+    # Chỉ refactor phần này để nhận tin nhắn động
+    async def _handle_extension(self, extension: str, message: str):
         """Handles both call and message actions for a single extension in parallel."""
         await asyncio.gather(
-            self._originate_call(extension),
-            self._send_message(extension)
+            self._originate_call(extension, message),
+            self._send_message(extension, message)
         )
 
-    async def _originate_call(self, extension: str):
+    # Chỉ refactor phần này để sử dụng tin nhắn động
+    async def _originate_call(self, extension: str, message: str):
         """Helper to originate a single call to an extension."""
         try:
             response = await self.manager.send_action(
@@ -71,21 +76,21 @@ class AMITrigger:
                     "Exten": extension,
                     "Priority": 1,
                     "CallerID": self.caller_id,
-                    "Variable": f"ALERT_MSG={self.alert_message}",
+                    "Variable": f"ALERT_MSG={message}", # Sử dụng tin nhắn động
                     "Async": "true",
                 }
             )
             if isinstance(response, dict):
                 status = response.get("Response", "Unknown")
-                message = response.get("Message", "")
-                logger.info(f"[📞 CALL] → {extension} | Status: {status} - {message}")
+                response_message = response.get("Message", "")
+                logger.info(f"[📞 CALL] → {extension} | Status: {status} - {response_message}")
             else:
                 logger.error(f"[📞 CALL] → {extension} | ❌ Invalid AMI response: {response}")
-
         except Exception as e:
             logger.error(f"[📞 CALL] → {extension} | ❌ Error: {e}")
 
-    async def _send_message(self, extension: str):
+    # Chỉ refactor phần này để sử dụng tin nhắn động
+    async def _send_message(self, extension: str, message: str):
         """Helper to send a single message to an extension."""
         try:
             response = await self.manager.send_action(
@@ -93,12 +98,12 @@ class AMITrigger:
                     'Action': 'MessageSend',
                     'To': f'pjsip:{extension}',
                     'From': 'pjsip:server',
-                    'Body': self.alert_message
+                    'Body': message # Sử dụng tin nhắn động
                 }
             )
             status = response.get("Response", "Unknown")
-            message = response.get("Message", "")
-            logger.info(f"[📨 SMS] → {extension} | Status: {status} - {message}")
+            response_message = response.get("Message", "")
+            logger.info(f"[📨 SMS] → {extension} | Status: {status} - {response_message}")
         except Exception as e:
             logger.error(f"[📨 SMS] → {extension} | ❌ Error: {e}")
 
