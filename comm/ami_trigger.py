@@ -2,7 +2,7 @@
 import asyncio
 from panoramisk.manager import Manager
 import logging
-from typing import List
+from typing import List, Dict, Union
 
 # Import configuration từ file config
 from config.config import EXTENSIONS, ALERT_MESSAGE, CALLER_ID
@@ -10,6 +10,7 @@ from config.config import EXTENSIONS, ALERT_MESSAGE, CALLER_ID
 # Setup logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
+
 
 class AMITrigger:
     def __init__(self, host: str, port: int, username: str, secret: str):
@@ -24,6 +25,9 @@ class AMITrigger:
         self.alert_message = ALERT_MESSAGE
         self.caller_id = CALLER_ID
         self.is_connected = False
+
+        # Track last call status per extension
+        self._last_call_status: Dict[str, str] = {}
 
     async def connect(self):
         """Connect to AMI asynchronously."""
@@ -74,10 +78,17 @@ class AMITrigger:
             self._send_message(extension, message)
         )
 
-    async def _originate_call(self, extension: str, message: str):
-        """Originate a call to the hangup point 9999."""
+    async def _originate_call(self, extension: str, message: str) -> bool:
+        """
+        Originate a call to the hangup point 9999.
+        Returns True if queued successfully.
+        """
+        if not await self._ensure_connected():
+            logger.warning(f"[📞 CALL] → {extension} | Connection lost, abort call.")
+            return False
+
         try:
-            response = await self.manager.send_action({
+            response: Union[dict, list] = await self.manager.send_action({
                 "Action": "Originate",
                 "Channel": f"PJSIP/{extension}",
                 "Context": "internal",
@@ -87,18 +98,44 @@ class AMITrigger:
                 "Variable": f"ALERT_MSG={message}",
                 "Async": "true",
             })
-            if isinstance(response, dict):
+
+            # Nếu trả về list of Messages, kiểm tra từng message
+            if isinstance(response, list):
+                success_msgs = [msg for msg in response if getattr(msg, 'Response', '').lower() == 'success']
+                failure_msgs = [msg for msg in response if getattr(msg, 'Response', '').lower() == 'failure']
+
+                if success_msgs:
+                    self._last_call_status[extension] = 'Success'
+                    logger.info(f"[📞 CALL] → {extension} | Originate queued successfully ({len(success_msgs)} success)")
+                    return True
+                else:
+                    self._last_call_status[extension] = 'Failure'
+                    logger.warning(f"[📞 CALL] → {extension} | All originate messages failed ({len(failure_msgs)} failure)")
+                    return False
+
+            # Nếu dict (trường hợp cũ)
+            elif isinstance(response, dict):
                 status = response.get("Response", "Unknown")
                 msg = response.get("Message", "")
+                self._last_call_status[extension] = status
                 logger.info(f"[📞 CALL] → {extension} | Status: {status} - {msg}")
+                return status.lower() == "success"
+
             else:
-                logger.error(f"[📞 CALL] → {extension} | ❌ Invalid AMI response: {response}")
+                logger.error(f"[📞 CALL] → {extension} | ❌ Unexpected AMI response type: {type(response)}")
+                return False
+
         except Exception as e:
             logger.error(f"[📞 CALL] → {extension} | ❌ Error: {e}")
             self.is_connected = False
+            return False
 
     async def _send_message(self, extension: str, message: str):
         """Send SIP MESSAGE to the extension via server endpoint."""
+        if not await self._ensure_connected():
+            logger.warning(f"[📨 SMS] → {extension} | Connection lost, abort SMS.")
+            return False
+
         try:
             response = await self.manager.send_action({
                 "Action": "MessageSend",
@@ -109,9 +146,11 @@ class AMITrigger:
             status = response.get("Response", "Unknown")
             msg = response.get("Message", "")
             logger.info(f"[📨 SMS] → {extension} | Status: {status} - {msg}")
+            return status.lower() == "success"
         except Exception as e:
             logger.error(f"[📨 SMS] → {extension} | ❌ Error: {e}")
             self.is_connected = False
+            return False
 
     async def close(self):
         """Disconnect safely from AMI."""

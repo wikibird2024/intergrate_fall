@@ -25,9 +25,12 @@ class DetectionProcessor:
     def __init__(self, ami_trigger: AMITrigger, telegram_bot: Optional[TelegramBot]):
         self.fall_detectors: Dict[str, FallDetector] = {}
         self.last_alert_timestamps: Dict[str, datetime] = {}
+        # ✅ DEDUP: Lưu timestamp sự kiện cuối cùng (dạng float) được xử lý thành công
+        self.last_fall_timestamps: Dict[str, float] = {}  
+        
         self.ami_trigger = ami_trigger
         self.telegram_bot = telegram_bot
-        self.cooldown_minutes = 5  # Made configurable
+        self.cooldown_minutes = 1  # Made configurable
 
     async def handle_camera_data(self, frame: Optional[np.ndarray], person_id: int, box: list, landmarks: list):
         """Process camera frame, detect falls, and send alerts if needed."""
@@ -39,11 +42,13 @@ class DetectionProcessor:
             status = "fall" if is_fall else "normal"
             draw_person(frame, box, landmarks, entity_id, status)
 
-        if is_fall and self._can_alert(entity_id):
-            fall_event = self._create_fall_event("camera", entity_id, latitude=0, longitude=0, has_gps_fix=False)
+        # Camera chỉ dùng cooldown (event_ts=None)
+        if is_fall and self._can_alert(entity_id): 
+            # Dùng timestamp hiện tại vì không có GPS/Device time
+            fall_event = self._create_fall_event("camera", entity_id, latitude=0, longitude=0, has_gps_fix=False) 
             fall_id = await self._insert_fall_event_with_retry(fall_event)
             if fall_id is None:
-                return  # Skip if DB insert fails after retries
+                return
 
             alert_msg = f"⚠️ Fall detected by camera for {entity_id}. Event ID: {fall_id}"
             logger.info(alert_msg)
@@ -54,7 +59,7 @@ class DetectionProcessor:
         """Process MQTT data from ESP32, validate, and handle fall alerts."""
         logger.info(f"[MQTT] 📥 Raw message on topic '{topic}': {mqtt_msg}")
 
-        # Parse JSON if raw payload
+        # Parse JSON
         if not isinstance(mqtt_msg, dict):
             try:
                 mqtt_msg = json.loads(mqtt_msg)
@@ -68,25 +73,18 @@ class DetectionProcessor:
         # Validate required fields
         device_id = mqtt_msg.get("device_id")
         fall_detected = mqtt_msg.get("fall_detected")
+        # ✅ Lấy timestamp từ MQTT để deduplication
+        event_ts = mqtt_msg.get("timestamp") 
 
-        if not device_id:
-            logger.error("[MQTT] Skipping message: missing or invalid device_id")
+        if not device_id or fall_detected is not True or not isinstance(event_ts, (int, float)):
+            logger.debug(f"[MQTT] Skipping message: Required fields (device_id, fall_detected=True, timestamp) missing/invalid.")
             return
 
         latitude = mqtt_msg.get("latitude")
         longitude = mqtt_msg.get("longitude")
         has_gps_fix = mqtt_msg.get("has_gps_fix", False)
-
-        # Always log the normalized data
-        logger.info(f"[MQTT] ✅ Parsed: device_id={device_id}, fall_detected={fall_detected}, "
-                      f"lat={latitude}, lon={longitude}, gps_fix={has_gps_fix}")
-
-        # Only continue if fall_detected = True
-        if fall_detected is not True:
-            logger.debug(f"[MQTT] Skipping alert: fall_detected={fall_detected}")
-            return
-
-        # Validate GPS coordinates
+        
+        # Validate GPS coordinates (giữ nguyên logic kiểm tra range)
         if latitude is not None and longitude is not None:
             if not (isinstance(latitude, (int, float)) and isinstance(longitude, (int, float))):
                 logger.error(f"[MQTT] Invalid GPS: latitude={latitude}, longitude={longitude}")
@@ -94,15 +92,15 @@ class DetectionProcessor:
             if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
                 logger.error(f"[MQTT] GPS out of range: latitude={latitude}, longitude={longitude}")
                 return
-
-        # Ensure has_gps_fix is boolean
         if not isinstance(has_gps_fix, bool):
-            logger.warning(f"[MQTT] Invalid has_gps_fix: {has_gps_fix}, defaulting to False")
             has_gps_fix = False
 
-        # Process fall alert if allowed
-        if self._can_alert(device_id):
-            fall_event = self._create_fall_event("esp32", device_id, latitude, longitude, has_gps_fix)
+        logger.info(f"[MQTT] ✅ Parsed: device_id={device_id}, fall_detected={fall_detected}, ts={event_ts}")
+
+        # ✅ DEDUP: Sử dụng timestamp của event_ts từ thiết bị để check lặp
+        if self._can_alert(device_id, event_ts=event_ts):
+            # Pass event_ts vào _create_fall_event để đảm bảo timestamp DB chính xác
+            fall_event = self._create_fall_event("esp32", device_id, latitude, longitude, has_gps_fix, event_ts) 
             fall_id = await self._insert_fall_event_with_retry(fall_event)
             if fall_id is None:
                 logger.error(f"[MQTT] Failed to insert fall event for device {device_id}")
@@ -113,16 +111,18 @@ class DetectionProcessor:
             logger.info(alert_msg)
             await self._send_alerts(alert_msg, None)
             self._update_last_alert(device_id)
+        else:
+            logger.debug(f"[MQTT] Skipping alert for {device_id} (Deduplication or Cooldown active).")
 
     async def _send_alerts(self, msg: str, frame: Optional[np.ndarray] = None):
         """
         Centralized alert sending to AMI and Telegram.
-        Tối ưu hóa: Sử dụng asyncio.create_task để gửi cảnh báo song song và không chặn nhau.
+        Sử dụng asyncio.create_task để gửi cảnh báo song song.
         """
         ami_task = asyncio.create_task(self._send_ami_alert(msg), name="ami_alert")
         telegram_task = asyncio.create_task(self._send_telegram_alert(msg, frame), name="telegram_alert")
         
-        # Chờ cả hai hoàn thành, nhưng không để một lỗi làm hỏng task khác
+        # Chờ cả hai hoàn thành, không để lỗi chặn nhau
         await asyncio.gather(ami_task, telegram_task, return_exceptions=True)
 
     async def _send_ami_alert(self, msg: str):
@@ -139,7 +139,6 @@ class DetectionProcessor:
             await self._safe_send_telegram(frame, msg)
             logger.info("[ALERT] Telegram alert sent successfully.")
         except Exception as e:
-            # Lỗi đã được log chi tiết trong _safe_send_telegram, chỉ cần log tóm tắt ở đây.
             logger.error(f"[ALERT] Failed Telegram send: {e}")
 
     async def _safe_send_telegram(self, frame: Optional[np.ndarray], msg: str, retries: int = 3, delay: float = 2.0):
@@ -194,10 +193,10 @@ class DetectionProcessor:
             return cv2.imdecode(img_encoded, cv2.IMREAD_COLOR)
         return frame
 
-    def _create_fall_event(self, source: str, entity_id: str, latitude: float, longitude: float, has_gps_fix: bool) -> Dict[str, Any]:
+    def _create_fall_event(self, source: str, entity_id: str, latitude: float, longitude: float, has_gps_fix: bool, timestamp: Optional[float] = None) -> Dict[str, Any]:
         """Create a fall event dict."""
         return {
-            "timestamp": datetime.now().timestamp(),
+            "timestamp": timestamp if timestamp is not None else datetime.now().timestamp(),
             "source": source,
             "entity_id": entity_id,
             "fall_detected": True,
@@ -226,11 +225,32 @@ class DetectionProcessor:
             self.fall_detectors[entity_id] = FallDetector()
         return self.fall_detectors[entity_id]
 
-    def _can_alert(self, entity_id: str) -> bool:
-        """Check if alert cooldown has passed."""
+    def _can_alert(self, entity_id: str, event_ts: Optional[float] = None) -> bool:
+        """
+        Check if alert cooldown has passed AND (cho nguồn MQTT) event timestamp is new.
+        - event_ts=None: Camera/Sensor local (chỉ check cooldown).
+        - event_ts=float: MQTT (check deduplication VÀ cooldown).
+        """
+        # 1. Deduplication check (chỉ áp dụng cho nguồn có timestamp)
+        if event_ts is not None:
+            last_event_ts = self.last_fall_timestamps.get(entity_id)
+            if last_event_ts == event_ts:
+                logger.debug(f"[DEDUP] Blocking alert for {entity_id}: Duplicate timestamp {event_ts}")
+                return False  # Block duplicate event
+
+            # Cập nhật last_fall_timestamps (vì đây là event mới)
+            self.last_fall_timestamps[entity_id] = event_ts
+
+        # 2. Cooldown check (áp dụng cho tất cả các nguồn)
         now = datetime.now()
         last_alert = self.last_alert_timestamps.get(entity_id)
-        return last_alert is None or (now - last_alert) > timedelta(minutes=self.cooldown_minutes)
+        
+        is_cooldown_expired = last_alert is None or (now - last_alert) > timedelta(minutes=self.cooldown_minutes)
+        
+        if not is_cooldown_expired:
+            logger.debug(f"[COOLDOWN] Blocking alert for {entity_id}: Cooldown active.")
+        
+        return is_cooldown_expired
 
     def _update_last_alert(self, entity_id: str):
         """Update last alert timestamp."""
