@@ -1,9 +1,4 @@
-
-#!/usr/bin/env python3
-# esp32_stream.py
 """
-Production-ready ESP32-CAM MJPEG stream wrapper with mDNS + config.py integration.
-
 Features:
 - Robust parsing of MJPEG stream (chunked JPEG handling)
 - Persistent HTTP session (requests.Session)
@@ -166,8 +161,9 @@ class ESP32StreamWrapper:
         return (time.time() - self.last_frame_time) < self.alive_timeout
 
     def read(self) -> Tuple[bool, Optional[np.ndarray]]:
+        # Nâng cấp log từ debug lên info để dễ theo dõi sự kiện reconnect quan trọng
         if not self.is_alive():
-            logger.debug("[ESP32] Alive timeout expired; reconnecting.")
+            logger.info("[ESP32] Alive timeout expired; attempting reconnect.")
             self.connect()
 
         if self._iter is None and self.response:
@@ -175,8 +171,10 @@ class ESP32StreamWrapper:
 
         try:
             chunk = next(self._iter, None)
+            
+            # REFACTOR: Loại bỏ self.connect() khi không có chunk để tránh spam log.
+            # Logic Alive Watchdog sẽ xử lý việc reconnect sau timeout (10s).
             if not chunk:
-                self.connect()
                 return False, None
 
             self.bytes_buffer += chunk
@@ -195,6 +193,7 @@ class ESP32StreamWrapper:
                     self.last_frame_time = time.time()
                     return True, img
         except Exception as e:
+            # Vẫn gọi connect() khi có ngoại lệ thực sự xảy ra trong quá trình đọc
             logger.warning(f"[ESP32] Stream read error: {e}")
             self.connect()
         return False, None
@@ -259,7 +258,8 @@ if __name__ == "__main__":
     while True:
         ok, frame = cap.read() if hasattr(cap, "read") else (False, None)
         if not ok or frame is None:
-            time.sleep(0.1)
+            # REFACTOR: Tăng thời gian chờ lên 0.3s để tránh spam log và giảm tải CPU
+            time.sleep(0.3) 
             continue
         cv2.imshow("ESP32 Stream", frame)
         if cv2.waitKey(1) & 0xFF == 27:

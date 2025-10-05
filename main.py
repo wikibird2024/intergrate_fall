@@ -58,8 +58,10 @@ async def camera_processing_loop(cap, human_detector, skeleton_tracker, person_t
                 break
 
             if not ret or frame is None:
-                logger.warning("[CAMERA] Failed to read frame, retrying...")
-                await asyncio.sleep(0.05)
+                # REFACTOR: Tăng thời gian chờ lên (từ 0.05s lên 0.3s)
+                # Điều này giúp giảm spam log "Failed to read frame" khi camera mất kết nối tạm thời.
+                logger.warning("[CAMERA] Failed to read frame, sleeping 0.3s...")
+                await asyncio.sleep(0.3)
                 continue
 
             # Detect humans
@@ -82,6 +84,8 @@ async def camera_processing_loop(cap, human_detector, skeleton_tracker, person_t
             if frame_count % 100 == 0:
                 logger.info(f"[CAMERA] Processed {frame_count} frames")
 
+            # Tối ưu: Dùng sleep ngắn hơn khi đọc thành công để tăng FPS/giảm latency, 
+            # nhưng vẫn nhường quyền kiểm soát cho event loop.
             await asyncio.sleep(0.001)
 
     except asyncio.CancelledError:
