@@ -103,7 +103,7 @@ class AMITrigger:
             response = await self.manager.send_action({
                 "Action": "MessageSend",
                 "To": f"pjsip:{extension}",
-                "From": "pjsip:server",
+                "From": "server",
                 "Body": message
             })
             status = response.get("Response", "Unknown")
