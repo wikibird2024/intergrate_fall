@@ -1,115 +1,131 @@
+
 import asyncio
 from panoramisk.manager import Manager
 import logging
-from typing import Dict, Any, List
+from typing import List
 
-# Import configuration from a centralized file.
-# Vẫn import ALERT_MESSAGE để tương thích ngược với các file khác.
+# Import configuration từ file config
 from config.config import EXTENSIONS, ALERT_MESSAGE, CALLER_ID
 
-# Setup logging for the module
+# Setup logging
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 
 class AMITrigger:
-    def __init__(self, host, port, username, secret):
-        """Initializes the AMI Manager instance with credentials passed as arguments."""
-        self.manager = Manager(
-            host=host, port=port, username=username, secret=secret
-        )
-        self.extensions = EXTENSIONS
-        self.alert_message = ALERT_MESSAGE  # Vẫn giữ để không phá vỡ các file khác
-        self.caller_id = CALLER_ID
-        self.is_connected = False
-        
-        # Store host, port, etc., as direct attributes of the AMITrigger class
-        # to make them accessible for logging
+    def __init__(self, host: str, port: int, username: str, secret: str):
+        """Initialize AMI manager with given credentials."""
+        self.manager = Manager(host=host, port=port, username=username, secret=secret)
         self.host = host
         self.port = port
         self.username = username
         self.secret = secret
 
+        self.extensions = EXTENSIONS
+        self.alert_message = ALERT_MESSAGE
+        self.caller_id = CALLER_ID
+        self.is_connected = False
+
     async def connect(self):
-        """Asynchronously connect to the AMI server."""
+        """Connect to AMI asynchronously."""
         try:
-            logger.info(f"[AMI] Connecting to AMI at {self.host}:{self.port}...")
+            logger.info(f"[AMI] Connecting to {self.host}:{self.port}...")
             await self.manager.connect()
             self.is_connected = True
             logger.info("[AMI] ✅ Connected to AMI server.")
         except Exception as e:
-            logger.error(f"[AMI] ❌ Failed to connect to AMI: {e}")
             self.is_connected = False
+            logger.error(f"[AMI] ❌ Failed to connect: {e}")
             raise
 
-    # Chỉ refactor phần này để nhận tin nhắn động
-    async def alert_devices(self, message: str):
-        """
-        Triggers a multi-channel alert by initiating calls and sending messages to a list of extensions.
-        This method now receives a dynamic message as a parameter.
-        """
-        if not self.is_connected:
-            logger.warning("[AMI] ⚠️ Not connected to AMI. Alert not sent.")
+    async def _ensure_connected(self) -> bool:
+        """Check and reconnect if disconnected."""
+        if self.is_connected:
+            return True
+        logger.warning("[AMI] ⚠️ Connection lost. Attempting reconnect...")
+        try:
+            await self.connect()
+            return True
+        except Exception:
+            return False
+
+    async def alert_devices(self, message: str = None):
+        """Send alert to all configured extensions."""
+        message = message or self.alert_message
+
+        if not await self._ensure_connected():
+            logger.warning("[AMI] Alert aborted due to connection failure.")
             return
 
         logger.info(f"[AMI] Triggering alert to {len(self.extensions)} device(s)...")
 
-        # Truyền tin nhắn động vào hàm handle_extension
-        tasks = [self._handle_extension(extension, message) for extension in self.extensions]
-        await asyncio.gather(*tasks)
+        # Gửi alert song song
+        tasks = [self._handle_extension(ext, message) for ext in self.extensions]
+        await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Chỉ refactor phần này để nhận tin nhắn động
+        # Đợi 3s cho channel cleanup
+        CLEANUP_DELAY_SECONDS = 3
+        await asyncio.sleep(CLEANUP_DELAY_SECONDS)
+        logger.info("[AMI] Alert process finished.")
+
     async def _handle_extension(self, extension: str, message: str):
-        """Handles both call and message actions for a single extension in parallel."""
+        """Send call and message to a single extension concurrently."""
         await asyncio.gather(
             self._originate_call(extension, message),
             self._send_message(extension, message)
         )
 
-    # Chỉ refactor phần này để sử dụng tin nhắn động
     async def _originate_call(self, extension: str, message: str):
-        """Helper to originate a single call to an extension."""
+        """Originate a call to the hangup point 9999."""
         try:
-            response = await self.manager.send_action(
-                {
-                    "Action": "Originate",
-                    "Channel": f"PJSIP/{extension}",
-                    "Context": "internal",
-                    "Exten": extension,
-                    "Priority": 1,
-                    "CallerID": self.caller_id,
-                    "Variable": f"ALERT_MSG={message}", # Sử dụng tin nhắn động
-                    "Async": "true",
-                }
-            )
+            response = await self.manager.send_action({
+                "Action": "Originate",
+                "Channel": f"PJSIP/{extension}",
+                "Context": "internal",
+                "Exten": "9999",           # Hangup point trong extensions.ael
+                "Priority": 1,
+                "CallerID": self.caller_id,
+                "Variable": f"ALERT_MSG={message}",
+                "Async": "true",
+            })
             if isinstance(response, dict):
                 status = response.get("Response", "Unknown")
-                response_message = response.get("Message", "")
-                logger.info(f"[📞 CALL] → {extension} | Status: {status} - {response_message}")
+                msg = response.get("Message", "")
+                logger.info(f"[📞 CALL] → {extension} | Status: {status} - {msg}")
             else:
                 logger.error(f"[📞 CALL] → {extension} | ❌ Invalid AMI response: {response}")
         except Exception as e:
             logger.error(f"[📞 CALL] → {extension} | ❌ Error: {e}")
+            self.is_connected = False
 
-    # Chỉ refactor phần này để sử dụng tin nhắn động
     async def _send_message(self, extension: str, message: str):
-        """Helper to send a single message to an extension."""
+        """Send SIP MESSAGE to the extension via server endpoint."""
         try:
-            response = await self.manager.send_action(
-                {
-                    'Action': 'MessageSend',
-                    'To': f'pjsip:{extension}',
-                    'From': 'pjsip:server',
-                    'Body': message # Sử dụng tin nhắn động
-                }
-            )
+            response = await self.manager.send_action({
+                "Action": "MessageSend",
+                "To": f"pjsip:{extension}",
+                "From": "pjsip:server",
+                "Body": message
+            })
             status = response.get("Response", "Unknown")
-            response_message = response.get("Message", "")
-            logger.info(f"[📨 SMS] → {extension} | Status: {status} - {response_message}")
+            msg = response.get("Message", "")
+            logger.info(f"[📨 SMS] → {extension} | Status: {status} - {msg}")
         except Exception as e:
             logger.error(f"[📨 SMS] → {extension} | ❌ Error: {e}")
+            self.is_connected = False
 
     async def close(self):
-        """Disconnect safely from the AMI server."""
+        """Disconnect safely from AMI."""
         if self.is_connected:
             self.manager.close()
             self.is_connected = False
             logger.info("[AMI] 🔌 Disconnected from AMI server.")
+
+
+# === Example usage ===
+# async def main():
+#     ami = AMITrigger(host="127.0.0.1", port=5038, username="hx", secret="123")
+#     await ami.connect()
+#     await ami.alert_devices("⚠️ Cảnh báo: Ngã phát hiện tại vị trí!")
+#     await ami.close()
+#
+# asyncio.run(main())

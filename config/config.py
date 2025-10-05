@@ -96,7 +96,7 @@ AMI_USERNAME = os.getenv("AMI_USERNAME")      # bí mật -> .env
 AMI_SECRET = os.getenv("AMI_SECRET")          # bí mật -> .env
 ENABLE_AMI = True
 
-EXTENSIONS = ['6001', '6002']
+EXTENSIONS = ['6001', '6002', '6004']
 ALERT_MESSAGE = "Fall detected! Please check immediately."
 CALLER_ID = "FallAlertSystem <1000>"
 

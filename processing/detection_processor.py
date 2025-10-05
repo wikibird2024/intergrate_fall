@@ -1,4 +1,3 @@
-
 import cv2
 import numpy as np
 from datetime import datetime, timedelta
@@ -80,7 +79,7 @@ class DetectionProcessor:
 
         # Always log the normalized data
         logger.info(f"[MQTT] ✅ Parsed: device_id={device_id}, fall_detected={fall_detected}, "
-                    f"lat={latitude}, lon={longitude}, gps_fix={has_gps_fix}")
+                      f"lat={latitude}, lon={longitude}, gps_fix={has_gps_fix}")
 
         # Only continue if fall_detected = True
         if fall_detected is not True:
@@ -116,15 +115,31 @@ class DetectionProcessor:
             self._update_last_alert(device_id)
 
     async def _send_alerts(self, msg: str, frame: Optional[np.ndarray] = None):
-        """Centralized alert sending to AMI and Telegram."""
+        """
+        Centralized alert sending to AMI and Telegram.
+        Tối ưu hóa: Sử dụng asyncio.create_task để gửi cảnh báo song song và không chặn nhau.
+        """
+        ami_task = asyncio.create_task(self._send_ami_alert(msg), name="ami_alert")
+        telegram_task = asyncio.create_task(self._send_telegram_alert(msg, frame), name="telegram_alert")
+        
+        # Chờ cả hai hoàn thành, nhưng không để một lỗi làm hỏng task khác
+        await asyncio.gather(ami_task, telegram_task, return_exceptions=True)
+
+    async def _send_ami_alert(self, msg: str):
+        """Helper to send AMI alert with error handling."""
         try:
             await self.ami_trigger.alert_devices(msg)
+            logger.info("[ALERT] AMI alert sent successfully.")
         except Exception as e:
             logger.error(f"[ALERT] Failed AMI send: {e}")
 
+    async def _send_telegram_alert(self, msg: str, frame: Optional[np.ndarray]):
+        """Helper to send Telegram alert with safe retry logic."""
         try:
             await self._safe_send_telegram(frame, msg)
+            logger.info("[ALERT] Telegram alert sent successfully.")
         except Exception as e:
+            # Lỗi đã được log chi tiết trong _safe_send_telegram, chỉ cần log tóm tắt ở đây.
             logger.error(f"[ALERT] Failed Telegram send: {e}")
 
     async def _safe_send_telegram(self, frame: Optional[np.ndarray], msg: str, retries: int = 3, delay: float = 2.0):
